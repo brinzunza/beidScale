@@ -2,7 +2,7 @@
 Usage: python build_table.py shard --pair EURUSD --tf 5 --reset ny --out DIR | python build_table.py merge --out DIR"""
 import sys, os, json, argparse, numpy as np, pandas as pd
 from pathlib import Path
-import data as DD, zones as Z, rewards as RW, actions as A, windows as W
+import data as DD, zones as Z, rewards as RW, actions as A, windows as W, features as FT
 DAY_EXCL = ("pair", "date", "atr", "c", "o", "h", "l", "year", "next_date")
 
 def days_table():
@@ -16,9 +16,9 @@ def day_features(zt, pair, d, cols):
 
 def shard(pair, tf, reset, out, params=None, start=None, end=None):
     m1 = DD.load_m1(pair, start, end); p = params or Z.ZoneParams(tf=tf, reset=reset); zt = Z.build_zone_table(m1, p); m15 = DD.resample(m1, 15); j15 = np.searchsorted(m15["e"], zt.ev.values, side="right") - 1
-    ok = (zt.ev.values >= W.L1 + 5) & (j15 >= W.L2 + 5); zt = zt[ok].reset_index(drop=True); j15 = j15[ok]; rw = RW.build_rewards(m1, zt, DD.PIP[pair]); d, cols = days_table(); X = day_features(zt, pair, d, cols)
+    ok = (zt.ev.values >= W.L1 + 5) & (j15 >= W.L2 + 5); zt = zt[ok].reset_index(drop=True); j15 = j15[ok]; rw = RW.build_rewards(m1, zt, DD.PIP[pair]); d, cols = days_table(); X = np.concatenate([day_features(zt, pair, d, cols), FT.event_features(m1, zt, pair, start, end)], 1)
     out = Path(out) / "shards"; out.mkdir(parents=True, exist_ok=True); name = f"{pair}_{p.tf}_{p.reset}"; zt = zt.assign(pair=DD.PAIRS.index(pair), j15=j15, pairname=pair, ztf=p.tf, reset=p.reset)
-    np.savez(out / f"{name}.npz", R=rw["R"], F=rw["F"], RISK=rw["RISK"], V=rw["V"], FIL=rw["FIL"], X=X); zt.to_parquet(out / f"{name}.parquet"); json.dump(dict(cols=cols), open(out / "daycols.json", "w")); print(name, "zones", len(zt), flush=True)
+    np.savez(out / f"{name}.npz", R=rw["R"], F=rw["F"], RISK=rw["RISK"], V=rw["V"], FIL=rw["FIL"], X=X); zt.to_parquet(out / f"{name}.parquet"); json.dump(dict(cols=cols, feat_names=FT.NAMES), open(out / "daycols.json", "w")); print(name, "zones", len(zt), flush=True)
 
 def merge(out):
     out = Path(out); fs = sorted((out / "shards").glob("*.parquet")); parts = [pd.read_parquet(f) for f in fs]; zt = pd.concat(parts, ignore_index=True)

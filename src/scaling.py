@@ -11,7 +11,7 @@ def plan(a):
 def collect(a):
     rows = []; ys = [int(y) for y in a.years.split(",")]
     for s in SIZES:
-        npar = M.BEIDNet(s, n_ctx=50).n_params()
+        npar = M.BEIDNet(s, n_ctx=4 + 46 + len(__import__("features").NAMES)).n_params()
         for f in FRACS:
             d = Path(a.runs) / f"scale_{s}_{f}"; logs = [pd.read_csv(d / f"log_{y}.csv") for y in ys if (d / f"log_{y}.csv").exists()]; files = [str(d / f"pred_{y}.npz") for y in ys if (d / f"pred_{y}.npz").exists()]
             if not logs: continue
