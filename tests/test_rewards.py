@@ -1,5 +1,5 @@
 """Reward kernel vs an independent brute-force per-bar reference, plus invariants."""
-import sys, numpy as np
+import os, sys, numpy as np, pytest
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "src"))
 import data as DD, zones as Z, actions as A, rewards as RW
 
@@ -7,11 +7,11 @@ def ref_action(m1, row, a, pip, minr_pips=1.5, horizon=2880):
     e, j, k, d = A.decode(a); sg = int(row.side); N = len(m1["t"]); o, h, l, c = m1["o"], m1["h"], m1["l"], m1["c"]
     hi = (lambda i: h[i]) if sg > 0 else (lambda i: -l[i]); lo = (lambda i: l[i]) if sg > 0 else (lambda i: -h[i]); cl = (lambda i: c[i]) if sg > 0 else (lambda i: -c[i]); op = (lambda i: o[i]) if sg > 0 else (lambda i: -o[i])
     tp = row.top if sg > 0 else -row.bot; bt = row.bot if sg > 0 else -row.top; H = tp - bt; az = row.atr15; minr = minr_pips * pip
-    ev = int(row.ev)
+    ev = int(row.ev); pen = float(os.environ.get("BEID_FILL_PEN", "0")) * pip
     if e < 5:
         E = tp - A.DEPTH[e] * H; f = None
         for i in range(ev, int(row.ord_end)):
-            if lo(i) <= E: f = i; break
+            if lo(i) <= E - pen: f = i; break
         if f is None: return None, None            # unfilled, validity checked separately
     else: E = op(ev); f = ev
     stops = [bt, bt - 0.25 * H, bt - 0.5 * H, E - az, E - 2 * az]; r = E - stops[j]
@@ -24,10 +24,10 @@ def ref_action(m1, row, a, pip, minr_pips=1.5, horizon=2880):
     if d == 0: stop_lvl, tgt_lvl = E - r, E + t
     else: stop_lvl, tgt_lvl = E + r, E - t
     for i in range(f, hend + 1):
-        if d == 0: hit_stop = lo(i) <= stop_lvl; hit_t = (i > f) and hi(i) >= tgt_lvl
-        else: hit_stop = hi(i) >= stop_lvl; hit_t = (i > f) and lo(i) <= tgt_lvl
+        if d == 0: hit_stop = (E - lo(i)) >= r; hit_t = (i > f) and (hi(i) - E) >= t                       # distances, as in the kernel (level comparisons can differ by a float step on exact ties)
+        else: hit_stop = (hi(i) - E) >= r; hit_t = (i > f) and (E - lo(i)) >= t
         if e == 5 and i == f:   # market entry: the first bar is a normal bar (fill at its open), target may hit on it too
-            hit_t = (hi(i) >= tgt_lvl) if d == 0 else (lo(i) <= tgt_lvl)
+            hit_t = ((hi(i) - E) >= t) if d == 0 else ((E - lo(i)) >= t)
         if hit_stop: return -1.0, f
         if hit_t: return t / r, f
     ce = cl(hend); return ((ce - E) / r if d == 0 else (E - ce) / r), f
@@ -35,7 +35,9 @@ def ref_action(m1, row, a, pip, minr_pips=1.5, horizon=2880):
 def make():
     m1 = DD.load_m1("EURUSD", start="2012-03-01", end="2012-04-30"); zt = Z.build_zone_table(m1, Z.ZoneParams(tf=15)); return m1, zt
 
-def test_kernel_matches_reference():
+@pytest.mark.parametrize("pen", ["0", "0.3"])
+def test_kernel_matches_reference(pen, monkeypatch):
+    monkeypatch.setenv("BEID_FILL_PEN", pen)
     m1, zt = make(); pip = DD.PIP["EURUSD"]; zs = zt.iloc[:120]; out = RW.build_rewards(m1, zs, pip); rng = np.random.default_rng(0); n_cmp = 0; bad = 0
     for zi in range(len(zs)):
         row = zs.iloc[zi]

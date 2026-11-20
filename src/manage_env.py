@@ -13,7 +13,8 @@ class Episodes:
         tgt = A.MULT[k] * r if k < 5 else ((tp - E) if k == 5 else 2 * H); pip = np.array([DD.PIP[DD.PAIRS[p]] for p in z.pair.values])
         fil = np.asarray(T.FIL[rows])[:, e].astype(np.int64); ok = (np.asarray(T.F[rows])[:, e] > 0) & (np.asarray(T.V[rows])[:, A.aid(e, j, k, 0)] > 0) & (fil >= 0)
         self.rows = rows[ok]; self.n = int(ok.sum()); sel = np.flatnonzero(ok)
-        self.sg = sg[sel]; self.E = E[sel]; self.r = r[sel]; self.stop0 = E[sel] - r[sel]; self.tgt = E[sel] + tgt[sel]; self.fill = (np.array([T.store.off1[DD.PAIRS[p]] for p in z.pair.values[sel]]) + z.ev.values[sel] + fil[sel]); self.risk_pips = r[sel] / pip[sel]
+        self.sg = sg[sel]; self.E = E[sel]; self.r = r[sel]; self.stop0 = stops[j][sel]; self.tgt = E[sel] + tgt[sel]; self.tgt_off = tgt[sel];   # the exact stop level (E - (E - stop) can be one float step off and miss a bar that touches the stop exactly); target compared as a distance, like the Table A kernel
+        self.fill = (np.array([T.store.off1[DD.PAIRS[p]] for p in z.pair.values[sel]]) + z.ev.values[sel] + fil[sel]); self.risk_pips = r[sel] / pip[sel]
         self.H = (H / az)[sel]; self.hr = z.ny_hour.values[sel]; self.spread = spread; self.year = z.year.values[sel]
     def sub(self, mask):
         s = Episodes.__new__(Episodes)
@@ -23,7 +24,7 @@ class Episodes:
 class ManageEnv:
     def __init__(self, store, ep: Episodes, device, K=5, spread=1.0):
         self.s, self.K, self.dev = store, K, device; self.ep = ep; self.spread = spread; self.nsteps = int(np.ceil(HORIZON / K)); fdt = torch.float32 if device.type == 'mps' else torch.float64; t = lambda x, dt=None: torch.from_numpy(np.asarray(x)).to(device=device, dtype=dt or fdt)
-        self.sg, self.E, self.r, self.stop0, self.tgt = t(ep.sg), t(ep.E), t(ep.r), t(ep.stop0), t(ep.tgt); self.fill = t(ep.fill, torch.long); self.risk_pips = t(ep.risk_pips); self.H = t(ep.H); self.hr = t(ep.hr)
+        self.sg, self.E, self.r, self.stop0, self.tgt = t(ep.sg), t(ep.E), t(ep.r), t(ep.stop0), t(ep.tgt); self.tgt_off = t(ep.tgt_off); self.fill = t(ep.fill, torch.long); self.risk_pips = t(ep.risk_pips); self.H = t(ep.H); self.hr = t(ep.hr)
         self.Nbar = store.tm1.shape[0]
     def _bars(self, idx, start, k):
         """mirrored (o,h,l,c) for bars start..start+k-1 of the selected episodes -> (B,k,4) in price units of the mirrored series."""
@@ -33,7 +34,8 @@ class ManageEnv:
         """idx: LongTensor of episode indices. Returns state dict; episodes whose fill bar already hit the stop are terminal at reset."""
         B = len(idx); st = dict(idx=idx, stop=self.stop0[idx].double().clone(), t=torch.zeros(B, device=self.dev, dtype=torch.long), done=torch.zeros(B, dtype=torch.bool, device=self.dev), R=torch.zeros(B, device=self.dev, dtype=torch.float64),
                                 mfe=torch.zeros(B, device=self.dev, dtype=torch.float64), mae=torch.zeros(B, device=self.dev, dtype=torch.float64), hist=torch.zeros(B, 16, device=self.dev, dtype=torch.float64), last=torch.zeros(B, device=self.dev, dtype=torch.float64), be=torch.zeros(B, device=self.dev, dtype=torch.float64))
-        fb = self._bars(idx, self.fill[idx], 1)[:, 0]; hit = fb[:, 2] <= st["stop"]; st["done"] |= hit; st["R"] = torch.where(hit, torch.full_like(st["R"], -1.0), st["R"]); st["last"] = ((fb[:, 3] - self.E[idx]) / self.r[idx]).double()
+        fb = self._bars(idx, self.fill[idx], 1)[:, 0]; hit = fb[:, 2] <= st["stop"] + 1e-6 * self.E[idx].abs();   # bars are stored as float32: compare with a tolerance far below the price grid (1e-5 EURUSD, 1e-3 USDJPY)
+        st["done"] |= hit; st["R"] = torch.where(hit, torch.full_like(st["R"], -1.0), st["R"]); st["last"] = ((fb[:, 3] - self.E[idx]) / self.r[idx]).double()
         self.hend = torch.minimum(self.fill[idx] + HORIZON, torch.full_like(self.fill[idx], self.Nbar - 1)); return st
     def _obs(self, st):
         idx = st["idx"]; r = self.r[idx].double(); E = self.E[idx].double()
@@ -47,8 +49,8 @@ class ManageEnv:
         start = self.fill[idx] + 1 + st["t"] * K; nb = torch.minimum(torch.full_like(start, K), self.hend + 1 - start).clamp(min=0); bars = self._bars(idx, start, K); valid = torch.arange(K, device=self.dev)[None, :] < nb[:, None]
         lo = torch.where(valid, bars[..., 2], torch.full_like(bars[..., 2], 1e18)).min(1).values; hi = torch.where(valid, bars[..., 1], torch.full_like(bars[..., 1], -1e18)).max(1).values; E = self.E[idx].double(); r = self.r[idx].double()
         # within a step: stop first (checked on the minimum low), then target on the maximum high; per-bar ordering inside the step is conservative
-        stopped = (~st["done"]) & (lo <= st["stop"]); won = (~st["done"]) & (~stopped) & (hi >= self.tgt[idx].double())
-        R = torch.zeros(B, device=self.dev, dtype=torch.float64); R = torch.where(stopped, (st["stop"] - E) / r, R); R = torch.where(won, (self.tgt[idx].double() - E) / r, R); ended = stopped | won
+        stopped = (~st["done"]) & (lo <= st["stop"] + 1e-6 * E.abs()); won = (~st["done"]) & (~stopped) & ((hi - E) >= self.tgt_off[idx].double() - 1e-6 * E.abs())
+        R = torch.zeros(B, device=self.dev, dtype=torch.float64); R = torch.where(stopped, (st["stop"] - E) / r, R); R = torch.where(won, self.tgt_off[idx].double() / r, R); ended = stopped | won
         close = torch.where(nb > 0, bars[torch.arange(B), (nb - 1).clamp(min=0), 3], st["last"] * r + E); cr = (close - E) / r
         exit_now = (~st["done"]) & (~ended) & (act == 1); R = torch.where(exit_now, cr, R); ended = ended | exit_now
         # end of horizon: forced market exit
