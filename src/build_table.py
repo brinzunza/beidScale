@@ -9,10 +9,25 @@ def days_table():
     f = DD.data_dir() / "days.parquet"
     d = pd.read_parquet(f); cols = [c for c in d.columns if c not in DAY_EXCL and not c.startswith(("y_", "mat_"))]; return d, cols
 
+# Mirroring of the 46 day factors to the long perspective of the trade (sell zones). Flip: x -> -x; complement: x -> 1 - x; swap: exchange two columns; swapneg: exchange and negate.
+DAY_FLIP = ("ret", "gap", "asia_ret", "lon_ret", "ny_ret", "slope5", "slope20", "slope60", "dma20", "dma50", "dma200", "ret5", "sA_trend", "xp1", "xp2", "xp3")
+DAY_COMPLEMENT = ("cloc", "pos20", "pos60")
+DAY_SWAP = (("upw", "dnw"), ("hi_hr", "lo_hr"), ("zBUY_size", "zSELL_size"), ("zBUY_near", "zSELL_near"))      # zBUY_*/zSELL_* are already expressed in each zone's own direction, so they swap without a sign change
+DAY_SWAPNEG = (("d_prev_hi", "d_prev_lo"),)                                                                       # (c - prev_hi)/a and (c - prev_lo)/a: under price -> -price they become -(c - prev_lo)/a and -(c - prev_hi)/a
+
+def mirror_day(X, cols, side):
+    """X (n, len(cols)) day-factor rows -> long-perspective rows (copy); side +1 buy, -1 sell."""
+    X = X.copy(); ix = {c: i for i, c in enumerate(cols)}; sell = np.asarray(side) < 0
+    for c in DAY_FLIP: X[sell, ix[c]] *= -1
+    for c in DAY_COMPLEMENT: X[sell, ix[c]] = 1.0 - X[sell, ix[c]]
+    for a, b in DAY_SWAP: t = X[sell, ix[a]].copy(); X[sell, ix[a]] = X[sell, ix[b]]; X[sell, ix[b]] = t
+    for a, b in DAY_SWAPNEG: t = X[sell, ix[a]].copy(); X[sell, ix[a]] = -X[sell, ix[b]]; X[sell, ix[b]] = -t
+    return X
+
 def day_features(zt, pair, d, cols):
     """last COMPLETED day's 46-factor vector for each event (strictly earlier FX day label)."""
     _, fx = DD.ny_parts(zt.t_ev.values); ev = pd.DataFrame({"date": fx, "k": np.arange(len(zt))}).sort_values("date"); dd = d[d.pair == pair][["date"] + cols].sort_values("date")
-    m = pd.merge_asof(ev, dd, on="date", direction="backward", allow_exact_matches=False).sort_values("k"); return m[cols].values.astype(np.float32)
+    m = pd.merge_asof(ev, dd, on="date", direction="backward", allow_exact_matches=False).sort_values("k"); return mirror_day(m[cols].values.astype(np.float32), cols, zt.side.values)
 
 def shard(pair, tf, reset, out, params=None, start=None, end=None):
     m1 = DD.load_m1(pair, start, end); p = params or Z.ZoneParams(tf=tf, reset=reset); zt = Z.build_zone_table(m1, p); m15 = DD.resample(m1, 15); j15 = np.searchsorted(m15["e"], zt.ev.values, side="right") - 1
