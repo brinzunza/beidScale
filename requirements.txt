@@ -1,0 +1,9 @@
+numpy
+pandas
+pyarrow
+numba
+torch>=2.2
+scipy
+scikit-learn
+xgboost>=2.0
+pytest

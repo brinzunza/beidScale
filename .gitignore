@@ -1,0 +1,9 @@
+__pycache__/
+.pytest_cache/
+results/embedding_demo/work/
+
+# data and run outputs never go in git
+data/
+*.npy
+*.npz
+.DS_Store
