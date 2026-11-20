@@ -36,7 +36,10 @@ def run(a):
     if a.tf: var_ok &= T.z.ztf.isin(a.tf).values
     if a.reset: var_ok &= (T.z.reset == a.reset).values
     if a.pairs: var_ok &= T.z.pairname.isin(a.pairs).values
+    if a.min_year: var_ok &= T.year >= a.min_year                      # drop early, lower-quality feed years (and events without day factors)
     tr = np.flatnonzero(var_ok & (T.year < Y - 1) & (T.t_ev + horizon_ns < boundary)); va = np.flatnonzero(var_ok & (T.year == Y - 1) & (T.t_ev + horizon_ns < np.datetime64(f"{Y}-01-01", "ns").astype(np.int64))); te = np.flatnonzero(var_ok & (T.year == Y))
+    if a.include_val: tr = np.flatnonzero(var_ok & (T.year < Y) & (T.t_ev + horizon_ns < np.datetime64(f"{Y}-01-01", "ns").astype(np.int64)))     # refit: train through the validation year with a fixed epoch count (no selection)
+    if a.no_atr_pips: T.geo[:, 1] = 0.0                                                   # remove the pips-scale feature that reveals the data era
     if a.frac < 1: tr = np.sort(np.random.default_rng(a.seed).choice(tr, int(len(tr) * a.frac), replace=False))
     if a.max_rows: tr = tr[-a.max_rows:]; va = va[:a.max_rows // 4]; te = te[:a.max_rows // 4]
     Xtr = np.asarray(T.X[np.sort(tr)[:: max(1, len(tr) // 50000)]]); mu, sd = np.nanmean(Xtr, 0), np.nanstd(Xtr, 0) + 1e-6
@@ -46,19 +49,26 @@ def run(a):
     model = torch.nn.parallel.DistributedDataParallel(net, device_ids=[lrank] if dev.type == "cuda" else None) if world > 1 else net
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=a.wd, betas=(0.9, 0.95)); steps_per_epoch = max(1, len(tr) // (a.batch * world)); total = steps_per_epoch * a.epochs; warm = max(10, total // 20)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, (s + 1) / warm) * 0.5 * (1 + np.cos(np.pi * min(1.0, s / max(total, 1))))); out = Path(a.out); out.mkdir(parents=True, exist_ok=True); log = []; best, best_state = 1e18, None; step = 0
-    use_amp = dev.type == "cuda"
+    use_amp = dev.type == "cuda"; params = [q for q in net.parameters()]
+    ema_p = [q.detach().clone() for q in params] if a.ema > 0 else None
+    def ema_swap():
+        for q, e in zip(params, ema_p): t = q.detach().clone(); q.data.copy_(e); e.copy_(t)           # exchange live and EMA weights (call twice to restore)
+    tfw = None
+    if a.tf_pow > 0: ztf = T.z.ztf.values; cnt = pd.Series(ztf[tr]).value_counts(); w_tf = (1.0 / cnt) ** a.tf_pow; tfw = pd.Series(ztf[tr]).map(w_tf).values; tfw = tfw / tfw.sum()
     def fwd(batch):
         idx, w1, w2, x, cat, netR, V = batch
         with torch.autocast(device_type=dev.type if dev.type != "mps" else "cpu", dtype=torch.bfloat16, enabled=use_amp): q, pol = model(w1, w2, x, cat)
         lq = M.q_loss(q, netR, V); lp, ev, ent = M.policy_loss(pol, V, netR, a.ent, a.objective); return lq, lp, ev, ent, q, pol
     for ep in range(a.epochs):
-        model.train(); rng = np.random.default_rng(a.seed * 1000 + ep); perm = rng.permutation(tr)[rank::world]; t0 = time.time(); agg = np.zeros(4)
+        model.train(); rng = np.random.default_rng(a.seed * 1000 + ep); perm = (rng.permutation(tr) if tfw is None else rng.choice(tr, len(tr), replace=True, p=tfw))[rank::world]; t0 = time.time(); agg = np.zeros(4)
         for b in range(steps_per_epoch):
             idx = perm[b * a.batch:(b + 1) * a.batch]
             if len(idx) < 8: break
             lq, lp, ev, ent, _, _ = fwd(T.batch(idx, dev, mu, sd, a.train_spread)); loss = a.wq * lq + a.wp * lp; opt.zero_grad(set_to_none=True); loss.backward(); nn.utils.clip_grad_norm_(model.parameters(), 1.0); opt.step(); sched.step(); step += 1
+            if ema_p is not None: torch._foreach_mul_(ema_p, a.ema); torch._foreach_add_(ema_p, [q.detach() for q in params], alpha=1 - a.ema)
             agg += np.array([lq.item(), lp.item(), ev.item(), ent.item()])
             if rank == 0 and step % a.log_every == 0: print(f"ep {ep} step {step}/{total} q {agg[0]/(b+1):.4f} pol {agg[1]/(b+1):.4f} E[net] {agg[2]/(b+1):+.4f} ent {agg[3]/(b+1):.3f} {time.time()-t0:.0f}s", flush=True)
+        if ema_p is not None: ema_swap()                                  # validate / select epochs with the EMA weights
         model.eval(); vl = []
         with torch.no_grad():
             for i in range(0, len(va), a.batch):
@@ -66,7 +76,9 @@ def run(a):
         vl = np.mean(vl, 0) if vl else np.array([np.nan, np.nan]); log.append(dict(epoch=ep, q_train=agg[0] / max(b + 1, 1), ev_train=agg[2] / max(b + 1, 1), q_val=vl[0], ev_val=vl[1], secs=time.time() - t0))
         if rank == 0:
             print("EPOCH", log[-1], flush=True); pd.DataFrame(log).to_csv(out / f"log_{Y}.csv", index=False)
-            if vl[0] < best: best = vl[0]; best_state = {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
+            crit = vl[0] if a.select == "q" else -vl[1]
+            if a.include_val or crit < best: best = crit; best_state = {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
+        if ema_p is not None: ema_swap()
     if rank == 0:
         if best_state is not None: net.load_state_dict(best_state)
         torch.save(dict(state=net.state_dict(), mu=mu, sd=sd, size=a.size), out / f"model_{Y}.pt"); net.eval(); Q, P = [], []
@@ -82,7 +94,10 @@ def parser():
     ap.add_argument("--epochs", type=int, default=6); ap.add_argument("--batch", type=int, default=512); ap.add_argument("--lr", type=float, default=3e-4); ap.add_argument("--wd", type=float, default=0.05); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--ent", type=float, default=0.01); ap.add_argument("--wq", type=float, default=1.0); ap.add_argument("--wp", type=float, default=1.0); ap.add_argument("--objective", default="net"); ap.add_argument("--train_spread", type=float, default=1.0)
     ap.add_argument("--frac", type=float, default=1.0); ap.add_argument("--max_rows", type=int, default=0); ap.add_argument("--tf", type=int, nargs="*"); ap.add_argument("--reset"); ap.add_argument("--pairs", nargs="*")
-    ap.add_argument("--null_shift", type=int, default=0); ap.add_argument("--plant", type=float, default=0.0); ap.add_argument("--init"); ap.add_argument("--bar_pairs", nargs="*"); ap.add_argument("--bars_start"); ap.add_argument("--bars_end"); ap.add_argument("--log_every", type=int, default=50); ap.add_argument("--grad_ckpt", action="store_true"); ap.add_argument("--mps", action="store_true"); return ap
+    ap.add_argument("--null_shift", type=int, default=0); ap.add_argument("--plant", type=float, default=0.0); ap.add_argument("--init"); ap.add_argument("--bar_pairs", nargs="*"); ap.add_argument("--bars_start"); ap.add_argument("--bars_end"); ap.add_argument("--log_every", type=int, default=50); ap.add_argument("--grad_ckpt", action="store_true"); ap.add_argument("--mps", action="store_true")
+    ap.add_argument("--min_year", type=int, default=0, help="train/val/test only on events from this year on (the day-factor table starts 2008; 2005-07 M1 data is coarse)"); ap.add_argument("--tf_pow", type=float, default=0.0, help=">0: sample training rows with weight count^-tf_pow per zone timeframe (1 = equal share per timeframe)")
+    ap.add_argument("--select", default="ev", choices=["ev", "q"], help="epoch selection on the validation year: policy expected net R (ev) or Q loss (q)"); ap.add_argument("--include_val", action="store_true", help="refit mode: also train on the validation year, keep the LAST epoch (use refit.py to pick the epoch count)"); ap.add_argument("--no_atr_pips", action="store_true")
+    ap.add_argument("--ema", type=float, default=0.0, help="EMA decay of the weights used for validation/prediction (e.g. 0.999); 0 = off"); return ap
 
 if __name__ == "__main__":
     run(parser().parse_args())

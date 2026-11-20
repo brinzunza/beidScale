@@ -29,7 +29,8 @@ def main():
     ap.add_argument("--K", type=int, default=5); ap.add_argument("--spread", type=float, default=1.0); ap.add_argument("--lr", type=float, default=3e-4); ap.add_argument("--base", type=int, nargs=3, default=[2, 0, 1]); ap.add_argument("--bar_pairs", nargs="*"); ap.add_argument("--bars_start"); ap.add_argument("--bars_end"); ap.add_argument("--seed", type=int, default=0); ap.add_argument("--mps", action="store_true"); a = ap.parse_args()
     dev = torch.device("cuda" if torch.cuda.is_available() else ("mps" if a.mps and torch.backends.mps.is_available() else "cpu")); torch.manual_seed(a.seed); rng = np.random.default_rng(a.seed)
     T = TR.Table(a.table); T.FIL = np.load(Path(a.table) / "FIL.npy", mmap_mode="r"); store = W.BarStore(pairs=tuple(a.bar_pairs or DD.PAIRS), start=a.bars_start, end=a.bars_end).to(dev); T.set_store(store)
-    Y = a.test_year; rows = np.flatnonzero((T.year < Y - 0) | (T.year == Y)); ep = ME.Episodes(T, rows, tuple(a.base), a.spread); tr = ep.year < Y; te = ep.year == Y; ept, epe = ep.sub(tr), ep.sub(te)
+    Y = a.test_year; rows = np.flatnonzero((T.year < Y - 0) | (T.year == Y)); ep = ME.Episodes(T, rows, tuple(a.base), a.spread); tr = (ep.year < Y) & (T.t_ev[ep.rows] + 72 * 3600 * 10 ** 9 < np.datetime64(f"{Y}-01-01", "ns").astype(np.int64)); te = ep.year == Y;  # (train episodes whose 48h path reaches into the test year are purged)
+    ept, epe = ep.sub(tr), ep.sub(te)
     envt = ME.ManageEnv(store, ept, dev, a.K, a.spread); enve = ME.ManageEnv(store, epe, dev, a.K, a.spread); print(f"episodes train {ept.n} test {epe.n} device {dev}", flush=True)
     net = AC().to(dev); opt = torch.optim.Adam(net.parameters(), lr=a.lr); log = []
     def evaluate(policy):

@@ -1,6 +1,6 @@
 """One place that reads reward arrays for a set of event rows, optionally applying (a) a circular-shift NULL (rewards of other events within the same pair, large offset) or (b) a PLANTED edge
 (+delta net R on one hidden action in a hidden state region). Used identically by training and evaluation so controls are consistent."""
-import numpy as np, pandas as pd
+import os, numpy as np, pandas as pd
 from pathlib import Path
 import actions as A
 PLANT_ACTION = A.aid(2, 0, 1, 0)       # 50% limit, far-edge stop, 1R target, with the zone
@@ -21,6 +21,7 @@ class RewardSource:
     def get(self, rows):
         rows = np.asarray(rows); rr = self.rew[rows]; o = np.argsort(rr); inv = np.argsort(o); s = rr[o]
         R = np.asarray(self.R[s], dtype=np.float32)[inv]; V = np.asarray(self.V[s])[inv]; F = np.asarray(self.F[s])[inv]; RISK = np.asarray(self.RISK[s])[inv]
+        if os.environ.get("BEID_NO_FADE") == "1": V = V.copy(); V[:, 1::2] = 0          # ablation: fade actions (odd ids; their stop-order fills are optimistic) become invalid everywhere (train, eval, baselines)
         if self.plant:
             m = self.region[rows] & (F[:, 2] > 0) & (V[:, PLANT_ACTION] > 0)           # planted edge sits on the STATE's region (rows), delivered through the reward row
             R[m, PLANT_ACTION] += np.float32(self.plant)

@@ -1,8 +1,8 @@
 """Table A reward builder: for every zone event and every one of the 420 actions, the gross R it would have produced on the M1 path. Run once (numba, parallel); training never re-simulates.
-Conventions: limit entries fill on the first M1 bar (>= event, < order end) whose low touches the level (fill price = level); the fill bar can only lose; a bar reaching both stop and target resolves as stop;
+Conventions: limit entries fill on the first M1 bar (>= event, < order end) whose low touches the level, or trades through it by `fill_pen_pips` (fill price = level); the fill bar can only lose; a bar reaching both stop and target resolves as stop;
 orders cancel at the order end; filled trades are closed at market after `horizon` bars; market entry fills at the open of the first bar after the event. Fade = opposite direction at the same entry price (stop-order semantics),
 with stop/target distances mirrored. Actions with risk < min_risk pips are invalid, as are zone-top / 2H targets closer than min_risk pips (R-multiple targets scale with the risk and stay valid)."""
-import numpy as np
+import os, numpy as np
 from numba import njit, prange
 import actions as A
 INF = 1 << 60
@@ -35,9 +35,9 @@ def _scan(sg, h, l, c, o, s_adv, s_nxt, hend, E, offs, order, nfin):
     return up_adv, dn_adv, up_nxt, dn_nxt, cend
 
 @njit(parallel=True, cache=True)
-def reward_kernel(o, h, l, c, ev, ord_end, side, top, bot, atr, pip, min_risk_pips, horizon):
+def reward_kernel(o, h, l, c, ev, ord_end, side, top, bot, atr, pip, min_risk_pips, horizon, fill_pen_pips):
     n = len(ev); N = len(o); R = np.zeros((n, A.NACT), np.float32); F = np.zeros((n, A.ENT), np.uint8); RISK = np.full((n, A.ENT, A.NSTOP), np.nan, np.float32); V = np.zeros((n, A.NACT), np.uint8); FIL = np.full((n, A.ENT), -1, np.int32)
-    minr = min_risk_pips * pip
+    minr = min_risk_pips * pip; pen = fill_pen_pips * pip                    # limit orders fill only when price trades THROUGH the level by `pen` (0 = touch)
     for z in prange(n):
         sg = side[z]
         if sg > 0: tp = top[z]; bt = bot[z]
@@ -48,7 +48,7 @@ def reward_kernel(o, h, l, c, ev, ord_end, side, top, bot, atr, pip, min_risk_pi
                 E = tp - DEPTHS[e] * H; f = -1
                 for i in range(ev[z], ord_end[z]):
                     lo = l[i] if sg > 0 else -h[i]
-                    if lo <= E: f = i; break
+                    if lo <= E - pen: f = i; break
                 s_adv = f; s_nxt = f + 1
             else:
                 E = o[ev[z]] if sg > 0 else -o[ev[z]]; f = ev[z]; s_adv = f; s_nxt = f
@@ -94,11 +94,12 @@ def reward_kernel(o, h, l, c, ev, ord_end, side, top, bot, atr, pip, min_risk_pi
                     else: R[z, _aid(e, j, k, 1)] = (E - cend) / r
     return R, F, RISK, V, FIL
 
-def build_rewards(m1, zt, pip, min_risk_pips=1.5, horizon=2880, chunk=50000):
+def build_rewards(m1, zt, pip, min_risk_pips=1.5, horizon=2880, chunk=50000, fill_pen_pips=None):
     """zt: zone table from zones.build_zone_table. Returns dict of arrays (float16 R, uint8 F, float32 RISK pips (n,6,5), uint8 V, int32 FIL)."""
+    if fill_pen_pips is None: fill_pen_pips = float(os.environ.get("BEID_FILL_PEN", "0"))          # one knob for Table A, Table B and the verification backtests
     outs = {k: [] for k in ("R", "F", "RISK", "V", "FIL")}
     for a in range(0, len(zt), chunk):
         z = zt.iloc[a:a + chunk]
-        R, F, RISK, V, FIL = reward_kernel(m1["o"], m1["h"], m1["l"], m1["c"], z.ev.values.astype(np.int64), z.ord_end.values.astype(np.int64), z.side.values.astype(np.int64), z.top.values, z.bot.values, z.atr15.values, pip, min_risk_pips, horizon)
+        R, F, RISK, V, FIL = reward_kernel(m1["o"], m1["h"], m1["l"], m1["c"], z.ev.values.astype(np.int64), z.ord_end.values.astype(np.int64), z.side.values.astype(np.int64), z.top.values, z.bot.values, z.atr15.values, pip, min_risk_pips, horizon, float(fill_pen_pips))
         for k, v in (("R", R.astype(np.float16)), ("F", F), ("RISK", RISK), ("V", V), ("FIL", FIL)): outs[k].append(v)
     return {k: np.concatenate(v) if v else None for k, v in outs.items()}

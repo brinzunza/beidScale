@@ -1,8 +1,8 @@
 """Evaluation of learned policies on Table A test rows: realized gross/net R across the spread sweep, month-cluster t, trades/yr, Kelly K, positive-year share, usage mix. Baselines on the same rows."""
-import numpy as np, pandas as pd
+import os, numpy as np, pandas as pd
 from pathlib import Path
 import data as DD, actions as A, rewardview as RV
-SWEEP = (0.0, 0.5, 1.0, 1.3, 1.6)
+SWEEP = (0.0, 0.5, 1.0, 1.3, 1.6, 2.0)        # 2.0 = stress for the wider spreads of the earlier years
 
 def cluster_t(x, months):
     x = np.asarray(x, float); u, inv = np.unique(months, return_inverse=True); S = np.bincount(inv, x); N = np.bincount(inv); m = S.sum() / len(x); se = np.sqrt(((S - m * N) ** 2).sum()) / len(x); return m, (m / se if se > 0 else np.nan)
@@ -19,8 +19,16 @@ class TableView:
         return gross, gross - np.nan_to_num(cost), filled, np.nan_to_num(risk)
 
 def dedupe(z, mask):
-    """one position per (pair, side, FX day): keep the earliest chosen event."""
-    _, fx = DD.ny_parts(z.t_ev.values); key = pd.DataFrame({"p": z.pair.values, "s": z.side.values, "d": fx, "i": np.arange(len(z))})[mask]; first = key.sort_values("i").drop_duplicates(["p", "s", "d"])["i"].values; out = np.zeros(len(z), bool); out[first] = True; return out
+    """one position per (pair, side, FX day): keep the earliest chosen event. With BEID_BLOCK_HOURS=h > 0 instead: after a chosen event no other event on the same (pair, side) is taken for h hours (set 48 to forbid overlapping holds, since trades close within 48 h)."""
+    bh = float(os.environ.get("BEID_BLOCK_HOURS", "0"))
+    if bh <= 0:
+        _, fx = DD.ny_parts(z.t_ev.values); key = pd.DataFrame({"p": z.pair.values, "s": z.side.values, "d": fx, "i": np.arange(len(z))})[mask]; first = key.sort_values("i").drop_duplicates(["p", "s", "d"])["i"].values; out = np.zeros(len(z), bool); out[first] = True; return out
+    t = z.t_ev.values.astype(np.int64); out = np.zeros(len(z), bool); blk = int(bh * 3600 * 10 ** 9); g = pd.DataFrame({"p": z.pair.values, "s": z.side.values, "i": np.arange(len(z))})[mask]
+    for _, grp in g.groupby(["p", "s"]):
+        last = -(1 << 62)
+        for i in grp.i.values[np.argsort(t[grp.i.values], kind="stable")]:
+            if t[i] - last >= blk: out[i] = True; last = t[i]
+    return out
 
 def summarize(tv, act, label, spreads=SWEEP, years=None):
     z = tv.z; chosen = act >= 0; keep = dedupe(z, chosen); act = np.where(keep, act, -1); rows = []

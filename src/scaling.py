@@ -15,7 +15,7 @@ def collect(a):
         for f in FRACS:
             d = Path(a.runs) / f"scale_{s}_{f}"; logs = [pd.read_csv(d / f"log_{y}.csv") for y in ys if (d / f"log_{y}.csv").exists()]; files = [str(d / f"pred_{y}.npz") for y in ys if (d / f"pred_{y}.npz").exists()]
             if not logs: continue
-            best = [l.sort_values("q_val").iloc[0] for l in logs]; r = dict(size=s, params_M=npar / 1e6, frac=f, q_val=float(np.mean([b.q_val for b in best])), ev_val=float(np.mean([b.ev_val for b in best])), years=len(files))
+            best = [l.sort_values("ev_val", ascending=False).iloc[0] for l in logs]; r = dict(size=s, params_M=npar / 1e6, frac=f, q_val=float(np.mean([b.q_val for b in best])), ev_val=float(np.mean([b.ev_val for b in best])), years=len(files))
             if len(files) >= 2:
                 p = EV.pooled(a.table, files)
                 for rule in ("greedy", "top1pct", "top3pct"):

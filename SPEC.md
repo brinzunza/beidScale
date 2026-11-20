@@ -33,3 +33,9 @@ A policy counts as a strategy only if, on the sealed block and on 2013-2022: net
 
 ## Multiplicity
 Table A configurations: model sizes 4 x data fractions 3 x objectives 2 x rules 4; Approach 2: corpus definitions x 420 actions (all reported, selection evaluated out of time); Approach 3: base entries tried (all reported). Nothing is dropped.
+
+## Amendment 1 (before any VM run): audit changes
+Defaults and the gate are unchanged. Added as options, all reported if used: `--min_year` (drop 2005-07: coarse M1 feed and no day factors), `--tf_pow` (timeframe-balanced sampling), `--ema` (EMA weights for epoch selection and prediction), `BEID_NO_FADE=1` (ablation without fade actions), seed ensembles (`ensemble.py`), and a development-years-only hyperparameter search (`sweep.py`). Table A rows now also carry a `day_missing` flag and the 152 event features; the 46 day factors are mirrored to the long perspective for sell zones. PPO training episodes whose 48 h path reaches into the test year are purged.
+
+## Amendment 2 (before any VM run): remaining audit fixes
+`--select ev` (default): the epoch is chosen by the policy's expected net R on the validation year instead of the Q loss (`--select q` restores the old rule); `--include_val` + `refit.py`: refit on train + validation year with the winning epoch count; `--no_atr_pips`: remove the pips-scale feature that reveals the data era; `--fill_pen` / `BEID_FILL_PEN`: limit orders fill only when price trades through the level by that many pips (default 0 = touch, as before; 0.3 is the stricter setting); `BEID_BLOCK_HOURS=48`: no overlapping holds per (pair, side) in evaluation (default keeps one per FX day); the spread sweep gains 2.0 pips as an era stress. Defaults for the gate runs are otherwise unchanged; every variant that is run is reported.

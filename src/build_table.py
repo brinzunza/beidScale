@@ -29,11 +29,11 @@ def day_features(zt, pair, d, cols):
     _, fx = DD.ny_parts(zt.t_ev.values); ev = pd.DataFrame({"date": fx, "k": np.arange(len(zt))}).sort_values("date"); dd = d[d.pair == pair][["date"] + cols].sort_values("date")
     m = pd.merge_asof(ev, dd, on="date", direction="backward", allow_exact_matches=False).sort_values("k"); return mirror_day(m[cols].values.astype(np.float32), cols, zt.side.values)
 
-def shard(pair, tf, reset, out, params=None, start=None, end=None):
+def shard(pair, tf, reset, out, params=None, start=None, end=None, fill_pen=None):
     m1 = DD.load_m1(pair, start, end); p = params or Z.ZoneParams(tf=tf, reset=reset); zt = Z.build_zone_table(m1, p); m15 = DD.resample(m1, 15); j15 = np.searchsorted(m15["e"], zt.ev.values, side="right") - 1
-    ok = (zt.ev.values >= W.L1 + 5) & (j15 >= W.L2 + 5); zt = zt[ok].reset_index(drop=True); j15 = j15[ok]; rw = RW.build_rewards(m1, zt, DD.PIP[pair]); d, cols = days_table(); X = np.concatenate([day_features(zt, pair, d, cols), FT.event_features(m1, zt, pair, start, end)], 1)
+    ok = (zt.ev.values >= W.L1 + 5) & (j15 >= W.L2 + 5); zt = zt[ok].reset_index(drop=True); j15 = j15[ok]; rw = RW.build_rewards(m1, zt, DD.PIP[pair], fill_pen_pips=fill_pen); d, cols = days_table(); Xd = day_features(zt, pair, d, cols); X = np.concatenate([Xd, FT.event_features(m1, zt, pair, start, end), (~np.isfinite(Xd).all(1)).astype(np.float32)[:, None]], 1)       # last column: day factors unavailable (events before 2008)
     out = Path(out) / "shards"; out.mkdir(parents=True, exist_ok=True); name = f"{pair}_{p.tf}_{p.reset}"; zt = zt.assign(pair=DD.PAIRS.index(pair), j15=j15, pairname=pair, ztf=p.tf, reset=p.reset)
-    np.savez(out / f"{name}.npz", R=rw["R"], F=rw["F"], RISK=rw["RISK"], V=rw["V"], FIL=rw["FIL"], X=X); zt.to_parquet(out / f"{name}.parquet"); json.dump(dict(cols=cols, feat_names=FT.NAMES), open(out / "daycols.json", "w")); print(name, "zones", len(zt), flush=True)
+    np.savez(out / f"{name}.npz", R=rw["R"], F=rw["F"], RISK=rw["RISK"], V=rw["V"], FIL=rw["FIL"], X=X); zt.to_parquet(out / f"{name}.parquet"); json.dump(dict(cols=cols, feat_names=FT.NAMES + ["day_missing"]), open(out / "daycols.json", "w")); print(name, "zones", len(zt), flush=True)
 
 def merge(out):
     out = Path(out); fs = sorted((out / "shards").glob("*.parquet")); parts = [pd.read_parquet(f) for f in fs]; zt = pd.concat(parts, ignore_index=True)
@@ -43,11 +43,11 @@ def merge(out):
     zt = zt.iloc[order].reset_index(drop=True); zt.to_parquet(tdir / "zones.parquet"); print("merged", n)
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(); ap.add_argument("cmd"); ap.add_argument("--pair"); ap.add_argument("--tf", type=int, default=1); ap.add_argument("--reset", default="ny"); ap.add_argument("--out", required=True); ap.add_argument("--start"); ap.add_argument("--end"); a = ap.parse_args()
-    if a.cmd == "shard": shard(a.pair, a.tf, a.reset, a.out, start=a.start, end=a.end)
+    ap = argparse.ArgumentParser(); ap.add_argument("cmd"); ap.add_argument("--pair"); ap.add_argument("--tf", type=int, default=1); ap.add_argument("--reset", default="ny"); ap.add_argument("--out", required=True); ap.add_argument("--start"); ap.add_argument("--end"); ap.add_argument("--fill_pen", type=float, default=None, help="pips a limit level must be traded through to fill (0 = touch; 0.3 is stricter; default = env BEID_FILL_PEN or 0)"); a = ap.parse_args()
+    if a.cmd == "shard": shard(a.pair, a.tf, a.reset, a.out, start=a.start, end=a.end, fill_pen=a.fill_pen)
     elif a.cmd == "all":
         for pr in DD.PAIRS:
             for tf in (1, 5, 15, 60):
-                for rs in ("ny", "utc"): shard(pr, tf, rs, a.out)
+                for rs in ("ny", "utc"): shard(pr, tf, rs, a.out, fill_pen=a.fill_pen)
         merge(a.out)
     elif a.cmd == "merge": merge(a.out)

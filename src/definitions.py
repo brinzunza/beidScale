@@ -32,6 +32,9 @@ def _load(pair):
     if pair not in _M1: _M1[pair] = DD.load_m1(pair)
     return _M1[pair]
 
+def _init_worker():
+    import numba; numba.set_num_threads(1)      # the reward kernel is prange-parallel; with one process per core every worker must use a single thread (each worker also holds ~1 GB of M1 bars: size --workers by RAM)
+
 def run_definition(args):
     i, max_zones, seed = args; p = sample_params(i, seed); tot = np.zeros((len(YEARS), A.NACT, 4)); nz = 0; t0 = time.time()
     for pair in DD.PAIRS:
@@ -46,7 +49,7 @@ def nz_scale(n_used, max_zones, nz_total): return 1.0       # sums are over the 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--out", required=True); ap.add_argument("--start", type=int, default=0); ap.add_argument("--end", type=int, default=100); ap.add_argument("--workers", type=int, default=4); ap.add_argument("--max_zones", type=int, default=40000); ap.add_argument("--seed", type=int, default=7); a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True); ids = list(range(a.start, a.end)); res = []
-    with Pool(a.workers) as pool:
+    with Pool(a.workers, initializer=_init_worker) as pool:
         for i, pv, tot, nz, secs in pool.imap_unordered(run_definition, [(i, a.max_zones, a.seed) for i in ids]):
             res.append((i, pv, tot)); print(f"def {i} zones {nz} {secs:.0f}s", flush=True)
             if len(res) % 20 == 0 or len(res) == len(ids): save(a, res)
