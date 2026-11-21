@@ -88,6 +88,6 @@ def baselines(table_dir, train_rows, test_rows, spread_select=1.0, spreads=SWEEP
     trv = TableView(table_dir, train_rows); n = len(train_rows); best, bestv = None, -1e9
     ent = np.repeat(np.arange(A.ENT), A.NSTOP * A.NTGT * A.NDIR); slot = A.risk_slot(np.arange(A.NACT)); risk = trv.RISK.reshape(n, -1)[:, slot]
     with np.errstate(divide="ignore", invalid="ignore"): net = trv.R - np.where(trv.F[:, ent] > 0, spread_select / risk, 0.0)
-    ok = (trv.V > 0) & (trv.F[:, ent] > 0); s = np.where(ok, net, 0.0).sum(0); c = ok.sum(0); mean = np.where(c > max(200, 0.2 * n), s / np.maximum(c, 1), -1e9)      # a fixed action must be valid and filled on >= 20% of the training events, otherwise the arg-max picks a rare-valid action with a lucky mean (tiny test sample, NaN t); a = int(mean.argmax())
+    ok = (trv.V > 0) & (trv.F[:, ent] > 0); s = np.where(ok, net, 0.0).sum(0); c = ok.sum(0); mean = np.where(c > max(200, 0.2 * n), s / np.maximum(c, 1), -1e9); a = int(mean.argmax())      # a fixed action must be valid and filled on >= 20% of the training events, else the arg-max picks a rare-valid action with a lucky mean
     tev = TableView(table_dir, test_rows); rows = summarize(tev, np.full(len(test_rows), a), f"best_fixed:{A.name(a)}", spreads)
     rng = np.random.default_rng(seed); ra = rng.integers(0, A.NACT, len(test_rows)); rows += summarize(tev, np.where(tev.V[np.arange(len(ra)), ra] > 0, ra, -1), "random_valid", spreads); return pd.DataFrame(rows)
